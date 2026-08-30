@@ -1,0 +1,15 @@
+{
+  "name": "oav-mantra-learning-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OAV Mantra e-learning platform with SQLite and PostgreSQL database support.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:export-postgres": "node ../database/export_to_postgres.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
+
