@@ -172,6 +172,8 @@ try {
   if (!studentCols.includes("photo")) {
     db.exec("ALTER TABLE students ADD COLUMN photo TEXT");
   }
+  // Ensure 0 image data stored in database: purge any base64 images, keep only cloud links or null
+  db.exec("UPDATE students SET photo = NULL WHERE photo LIKE 'data:image/%'");
 
   // Clear out any old default fake lessons from previous builds
   db.exec(`
@@ -546,11 +548,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: "Invalid photo format. Please upload a valid image." });
       }
 
-      // Update student photo in database for ID card & Dashboard
-      const cleanId = String(student.enrollment_id).trim().toUpperCase();
-      const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
-      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photo, cleanId, altId);
-
       // Attempt Google Drive upload if configured
       let driveResult = null;
       let driveError = null;
@@ -573,9 +570,16 @@ const server = http.createServer(async (req, res) => {
         console.log(`[Google Drive] Skipped upload for ${student.enrollment_id}: Google Drive is not configured.`);
       }
 
+      // Zero local image storage: Save ONLY the Google Drive link (short URL string, 0 image bytes stored in DB)
+      // If not on Drive, save null so database remains 100% lightweight without storing image files
+      const photoStorageUrl = driveResult ? (driveResult.webViewLink || driveResult.webContentLink) : null;
+      const cleanId = String(student.enrollment_id).trim().toUpperCase();
+      const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
+      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photoStorageUrl, cleanId, altId);
+
       return send(res, 200, {
         success: true,
-        photo,
+        photo: photoStorageUrl || photo, // Return Drive URL if available, otherwise student keeps local copy
         driveUploaded: Boolean(driveResult),
         driveFileUrl: driveResult ? driveResult.webViewLink : null,
         driveFileName: driveResult ? driveResult.fileName : null,
