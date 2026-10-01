@@ -9,7 +9,7 @@
     "db:export-postgres": "node ../database/export_to_postgres.js"
   },
   "dependencies": {
+    "googleapis": "^182.0.0",
     "pg": "^8.13.1"
   }
 }
-

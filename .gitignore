@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Google Cloud Service Account Credentials
+google-service-account.json
+*service-account*.json
+!google-service-account.example.json
+*.key.json
+

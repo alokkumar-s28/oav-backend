@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
+const { isGoogleDriveConfigured, uploadStudentPhotoToDrive } = require("./google-drive.js");
 
 const PORT = Number(process.env.PORT || 3000);
 const BACKEND_ROOT = __dirname;
@@ -37,9 +38,9 @@ function localSetting(name) {
 }
 
 // --- Admin token with fallback and logging ---
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || localSetting("ADMIN_TOKEN") || "admin123";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || localSetting("ADMIN_TOKEN") || "oav-mantra.2026";
 if (!process.env.ADMIN_TOKEN && !localSetting("ADMIN_TOKEN")) {
-  console.warn("⚠️  ADMIN_TOKEN not set. Using default 'admin123' for development.");
+  console.warn("⚠️  ADMIN_TOKEN not set. Using default 'oav-mantra.2026' for development.");
 }
 
 // --- Database connection ---
@@ -275,12 +276,12 @@ function send(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-function readBody(req) {
+function readBody(req, limit = 5_000_000) {
   return new Promise((resolve, reject) => {
     let data = "";
     req.on("data", chunk => {
       data += chunk;
-      if (data.length > 250_000) {
+      if (data.length > limit) {
         reject(new Error("Request payload too large"));
         req.destroy();
       }
@@ -532,21 +533,53 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // --- Student Photo Upload (Compressed) ---
+    // --- Student Photo Upload (Compressed Avatar + Google Drive Storage) ---
     if (req.method === "POST" && url.pathname === "/api/student/photo") {
       const student = studentSession(req);
       if (!student) return send(res, 401, { error: "Please log in to update your photo." });
 
-      const body = await readBody(req);
-      const photo = typeof body.photo === "string" ? body.photo.slice(0, 200_000) : "";
+      const body = await readBody(req, 6_000_000);
+      const photo = typeof body.photo === "string" ? body.photo.slice(0, 300_000) : "";
+      const highResPhoto = typeof body.highResPhoto === "string" ? body.highResPhoto : (typeof body.originalPhoto === "string" ? body.originalPhoto : photo);
 
       if (!photo || !photo.startsWith("data:image/")) {
         return send(res, 400, { error: "Invalid photo format. Please upload a valid image." });
       }
 
+      // Update student photo in database for ID card & Dashboard
       db.prepare("UPDATE students SET photo = ? WHERE enrollment_id = ?").run(photo, student.enrollment_id);
 
-      return send(res, 200, { success: true, photo });
+      // Attempt Google Drive upload if configured
+      let driveResult = null;
+      let driveError = null;
+
+      if (isGoogleDriveConfigured()) {
+        try {
+          const photoToUpload = highResPhoto && highResPhoto.startsWith("data:image/") ? highResPhoto : photo;
+          driveResult = await uploadStudentPhotoToDrive({
+            photoData: photoToUpload,
+            studentName: student.full_name,
+            enrollmentId: student.enrollment_id,
+            studentClass: student.student_class
+          });
+          console.log(`[Google Drive] Photo uploaded for ${student.enrollment_id} (${driveResult.fileName}) -> File ID: ${driveResult.fileId}`);
+        } catch (err) {
+          console.error(`[Google Drive] Upload failed for ${student.enrollment_id}:`, err.message);
+          driveError = err.message;
+        }
+      } else {
+        console.log(`[Google Drive] Skipped upload for ${student.enrollment_id}: Google Drive is not configured.`);
+      }
+
+      return send(res, 200, {
+        success: true,
+        photo,
+        driveUploaded: Boolean(driveResult),
+        driveFileUrl: driveResult ? driveResult.webViewLink : null,
+        driveFileName: driveResult ? driveResult.fileName : null,
+        driveConfigured: isGoogleDriveConfigured(),
+        driveError: driveError
+      });
     }
 
     // --- Student logout ---
