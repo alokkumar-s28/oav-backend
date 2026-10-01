@@ -451,7 +451,7 @@ const server = http.createServer(async (req, res) => {
 
       // 1. Primary Search: Match Enrollment ID (case-insensitive, with or without OAV- prefix) AND mobile number
       let student = db.prepare(`
-        SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, status 
+        SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status 
         FROM students 
         WHERE (UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)) OR UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)))
           AND (mobile = ? OR mobile = ?)
@@ -460,7 +460,7 @@ const server = http.createServer(async (req, res) => {
       // 2. Secondary Search: If mobile matched, check if enrollment ID belongs to this student
       if (!student) {
         student = db.prepare(`
-          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, status 
+          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status 
           FROM students 
           WHERE (UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)) OR UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)))
         `).get(enrollmentId, enrollmentId.startsWith("OAV-") ? enrollmentId.replace(/^OAV-/, "") : `OAV-${enrollmentId}`);
@@ -469,7 +469,7 @@ const server = http.createServer(async (req, res) => {
       // 3. Fallback Search: If student has their 10-digit mobile number in database
       if (!student) {
         student = db.prepare(`
-          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, status 
+          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status 
           FROM students 
           WHERE mobile = ?
         `).get(mobile);
@@ -547,7 +547,9 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Update student photo in database for ID card & Dashboard
-      db.prepare("UPDATE students SET photo = ? WHERE enrollment_id = ?").run(photo, student.enrollment_id);
+      const cleanId = String(student.enrollment_id).trim().toUpperCase();
+      const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
+      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photo, cleanId, altId);
 
       // Attempt Google Drive upload if configured
       let driveResult = null;
