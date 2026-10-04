@@ -172,8 +172,6 @@ try {
   if (!studentCols.includes("photo")) {
     db.exec("ALTER TABLE students ADD COLUMN photo TEXT");
   }
-  // Ensure 0 image data stored in database: purge any base64 images, keep only cloud links or null
-  db.exec("UPDATE students SET photo = NULL WHERE photo LIKE 'data:image/%'");
 
   // Clear out any old default fake lessons from previous builds
   db.exec(`
@@ -570,16 +568,17 @@ const server = http.createServer(async (req, res) => {
         console.log(`[Google Drive] Skipped upload for ${student.enrollment_id}: Google Drive is not configured.`);
       }
 
-      // Zero local image storage: Save ONLY the Google Drive link (short URL string, 0 image bytes stored in DB)
-      // If not on Drive, save null so database remains 100% lightweight without storing image files
-      const photoStorageUrl = driveResult ? (driveResult.webViewLink || driveResult.webContentLink) : null;
+      // Save student photo in database so it ALWAYS appears in Admin Panel
+      const photoToSave = (highResPhoto && highResPhoto.startsWith("data:image/")) 
+        ? highResPhoto 
+        : ((photo && photo.startsWith("data:image/")) ? photo : (driveResult ? driveResult.webViewLink : ""));
       const cleanId = String(student.enrollment_id).trim().toUpperCase();
       const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
-      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photoStorageUrl, cleanId, altId);
+      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photoToSave, cleanId, altId);
 
       return send(res, 200, {
         success: true,
-        photo: photoStorageUrl || photo, // Return Drive URL if available, otherwise student keeps local copy
+        photo: photoToSave,
         driveUploaded: Boolean(driveResult),
         driveFileUrl: driveResult ? driveResult.webViewLink : null,
         driveFileName: driveResult ? driveResult.fileName : null,
@@ -626,7 +625,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "GET" && url.pathname === "/api/admin/payments") {
         const payments = db.prepare(`
           SELECT p.id, p.amount, p.transaction_id, p.payment_date, p.payment_method, p.status,
-                 s.enrollment_id, s.full_name, s.student_class, s.mobile, s.city
+                 s.enrollment_id, s.full_name, s.student_class, s.mobile, s.city, s.photo
           FROM payments p
           JOIN students s ON s.enrollment_id = p.enrollment_id
           ORDER BY p.id DESC
