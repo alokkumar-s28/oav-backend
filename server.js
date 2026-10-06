@@ -43,6 +43,142 @@ if (!process.env.ADMIN_TOKEN && !localSetting("ADMIN_TOKEN")) {
   console.warn("⚠️  ADMIN_TOKEN not set. Using default 'oav-mantra.2026' for development.");
 }
 
+// --- Automated Email Notification System ---
+let nodemailer = null;
+try {
+  nodemailer = require("nodemailer");
+} catch (e) {
+  console.warn("⚠️  [Email Service] nodemailer not loaded:", e.message);
+}
+
+const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || localSetting("ADMIN_NOTIFICATION_EMAIL") || "alokkumar413q@gmail.com";
+const SMTP_HOST = process.env.SMTP_HOST || localSetting("SMTP_HOST") || "smtp.gmail.com";
+const SMTP_PORT = Number(process.env.SMTP_PORT || localSetting("SMTP_PORT") || 587);
+const SMTP_USER = process.env.SMTP_USER || localSetting("SMTP_USER") || "";
+const SMTP_PASS = process.env.SMTP_PASS || localSetting("SMTP_PASS") || "";
+
+async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }) {
+  const isLogin = String(eventType || "").toLowerCase().includes("login");
+  const eventLabel = isLogin ? "STUDENT DASHBOARD LOGIN" : "NEW STUDENT ENROLLMENT";
+  const name = student?.name || student?.full_name || "Student";
+  const enrollmentId = student?.enrollmentId || student?.enrollment_id || "N/A";
+  const mobile = student?.mobile || "N/A";
+  const email = student?.email || "";
+  const studentClass = student?.class || student?.student_class || "N/A";
+  const schoolType = student?.schoolType || student?.school_type || "N/A";
+  const city = student?.city || "N/A";
+  const school = student?.school || "N/A";
+  const nowIst = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " (IST)";
+  const clientIp = req ? (req.headers?.["x-forwarded-for"] || req.socket?.remoteAddress || "Unknown") : "Unknown";
+
+  // Prominent Real-time Server Console Alert
+  console.log(`\n======================================================`);
+  console.log(`🔔 [ADMIN NOTIFICATION] Event: ${eventLabel}`);
+  console.log(`📧 Target Admin Email: ${ADMIN_NOTIFICATION_EMAIL}`);
+  console.log(`👤 Student Name: ${name}`);
+  console.log(`🆔 Enrollment ID: ${enrollmentId}`);
+  console.log(`📱 Mobile Number: ${mobile}`);
+  console.log(`🏫 Class: Class ${studentClass}`);
+  console.log(`📍 Location: ${city} ${school && school !== 'N/A' ? `(${school})` : ""}`);
+  console.log(`⏰ Time: ${nowIst}`);
+  console.log(`🌐 IP Address: ${clientIp}`);
+  console.log(`======================================================\n`);
+
+  if (!nodemailer || !SMTP_USER || !SMTP_PASS) {
+    return { sent: false, reason: "SMTP credentials not configured in .env" };
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS
+      }
+    });
+
+    const badgeColor = isLogin ? "#10b981" : "#2563eb";
+
+    const html = `
+      <div style="font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #ffffff;">
+        <div style="background: linear-gradient(135deg, #1e293b, #0f172a); padding: 24px; text-align: center; color: #ffffff;">
+          <h1 style="margin: 0; font-size: 22px; letter-spacing: 0.5px;">OAV MANTRA</h1>
+          <p style="margin: 6px 0 0; color: #94a3b8; font-size: 13px;">Real-time Automated Admin Notification</p>
+        </div>
+        <div style="padding: 24px;">
+          <div style="display: inline-block; padding: 6px 14px; background: ${badgeColor}; color: #ffffff; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 16px;">
+            ${eventLabel}
+          </div>
+          <h2 style="margin: 0 0 16px; color: #1e293b; font-size: 18px;">
+            ${isLogin ? 'Student Logged Into Study Room' : 'A New Student Successfully Enrolled!'}
+          </h2>
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 20px;">
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b; width: 140px;">Student Name:</td>
+              <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">${name}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">Enrollment ID:</td>
+              <td style="padding: 10px 0; color: #2563eb; font-weight: bold; font-family: monospace; font-size: 15px;">${enrollmentId}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">Mobile Number:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${mobile}</td>
+            </tr>
+            ${email ? `
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">Email Address:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${email}</td>
+            </tr>` : ""}
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">Class:</td>
+              <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">Class ${studentClass}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">School Board:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${schoolType}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">City / District:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${city}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">School:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${school}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px 0; color: #64748b;">Date & Time:</td>
+              <td style="padding: 10px 0; color: #0f172a;">${nowIst}</td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 0; color: #64748b;">IP Address:</td>
+              <td style="padding: 10px 0; color: #0f172a; font-family: monospace;">${clientIp}</td>
+            </tr>
+          </table>
+          <div style="background: #f8fafc; border-radius: 8px; padding: 14px; font-size: 12px; color: #64748b; text-align: center;">
+            This is an automated administrative notification from <strong>OAV Mantra Portal</strong>.
+          </div>
+        </div>
+      </div>
+    `;
+
+    const info = await transporter.sendMail({
+      from: `"OAV Mantra Alerts" <${SMTP_USER}>`,
+      to: ADMIN_NOTIFICATION_EMAIL,
+      subject: `[OAV Mantra] ${isLogin ? '🔑 Login Alert' : '🎓 Enrollment Alert'}: ${name} (${enrollmentId})`,
+      html
+    });
+
+    console.log(`[Email Service] ✅ Email notification sent to ${ADMIN_NOTIFICATION_EMAIL}. Message ID: ${info.messageId}`);
+    return { sent: true, messageId: info.messageId };
+  } catch (err) {
+    console.error(`[Email Service] ❌ Failed to dispatch email notification:`, err.message);
+    return { sent: false, error: err.message };
+  }
+}
+
 // --- Database connection ---
 const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
@@ -514,6 +650,14 @@ const server = http.createServer(async (req, res) => {
 
       // Allow verified/active students
       createStudentSession(req, res, student.enrollment_id);
+
+      // Asynchronously dispatch student login alert to admin
+      sendAdminNotificationEmail({
+        eventType: "student_login",
+        student,
+        req
+      }).catch(err => console.warn("[Email Notification] Login alert background error:", err.message));
+
       return send(res, 200, {
         success: true,
         status: student.status,
@@ -865,6 +1009,13 @@ const server = http.createServer(async (req, res) => {
           UPDATE students SET full_name = ?, student_class = ?, school_type = ?, city = ?, school = ?
           WHERE enrollment_id = ?
         `).run(record.name, record.studentClass, record.schoolType, record.city, record.school || null, existing.enrollment_id);
+
+        sendAdminNotificationEmail({
+          eventType: "student_enrollment",
+          student: { ...record, enrollmentId: existing.enrollment_id },
+          req
+        }).catch(err => console.warn("[Email Notification] Enrollment alert error:", err.message));
+
         return send(res, 200, { success: true, enrollmentId: existing.enrollment_id, updated: true });
       }
 
@@ -882,7 +1033,27 @@ const server = http.createServer(async (req, res) => {
         record.school || null
       );
 
+      sendAdminNotificationEmail({
+        eventType: "student_enrollment",
+        student: record,
+        req
+      }).catch(err => console.warn("[Email Notification] Enrollment alert error:", err.message));
+
       return send(res, 201, { success: true, enrollmentId: record.enrollmentId });
+    }
+
+    // --- Admin Notification Dispatch Endpoint ---
+    if (req.method === "POST" && url.pathname === "/api/notify-admin") {
+      const body = await readBody(req);
+      if (body && body.student) {
+        sendAdminNotificationEmail({
+          eventType: body.event || "admin_alert",
+          student: body.student,
+          req
+        }).catch(err => console.warn("[Email Notification] Notify-admin route error:", err.message));
+        return send(res, 200, { success: true, message: "Admin alert queued successfully." });
+      }
+      return send(res, 400, { error: "Missing student data for notification." });
     }
 
     // --- Payment Submission ---
