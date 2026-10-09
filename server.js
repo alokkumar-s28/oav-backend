@@ -51,7 +51,7 @@ try {
   console.warn("⚠️  [Email Service] nodemailer not loaded:", e.message);
 }
 
-const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || localSetting("ADMIN_NOTIFICATION_EMAIL") || "alokkumar413q@gmail.com";
+const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || localSetting("ADMIN_NOTIFICATION_EMAIL") || "alokkumar413q@gmail.com, oavmantra@gmail.com";
 const SMTP_HOST = process.env.SMTP_HOST || localSetting("SMTP_HOST") || "smtp.gmail.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || localSetting("SMTP_PORT") || 587);
 const SMTP_USER = process.env.SMTP_USER || localSetting("SMTP_USER") || "";
