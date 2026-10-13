@@ -57,11 +57,12 @@ const SMTP_PORT = Number(process.env.SMTP_PORT || localSetting("SMTP_PORT") || 5
 const SMTP_USER = process.env.SMTP_USER || localSetting("SMTP_USER") || "";
 const SMTP_PASS = process.env.SMTP_PASS || localSetting("SMTP_PASS") || "";
 
-async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }) {
+async function sendAdminNotificationEmail({ eventType, student, payment, req, extraInfo }) {
+  const isPayment = String(eventType || "").toLowerCase().includes("payment");
   const isLogin = String(eventType || "").toLowerCase().includes("login");
-  const eventLabel = isLogin ? "STUDENT DASHBOARD LOGIN" : "NEW STUDENT ENROLLMENT";
-  const name = student?.name || student?.full_name || "Student";
-  const enrollmentId = student?.enrollmentId || student?.enrollment_id || "N/A";
+  const eventLabel = isPayment ? "PAYMENT CLAIM SUBMITTED (₹500)" : (isLogin ? "STUDENT DASHBOARD LOGIN" : "NEW STUDENT ENROLLMENT");
+  const name = payment?.studentName || student?.name || student?.full_name || "Student";
+  const enrollmentId = payment?.enrollmentId || student?.enrollmentId || student?.enrollment_id || "N/A";
   const mobile = student?.mobile || "N/A";
   const email = student?.email || "";
   const studentClass = student?.class || student?.student_class || "N/A";
@@ -77,9 +78,15 @@ async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }
   console.log(`📧 Target Admin Email: ${ADMIN_NOTIFICATION_EMAIL}`);
   console.log(`👤 Student Name: ${name}`);
   console.log(`🆔 Enrollment ID: ${enrollmentId}`);
-  console.log(`📱 Mobile Number: ${mobile}`);
-  console.log(`🏫 Class: Class ${studentClass}`);
-  console.log(`📍 Location: ${city} ${school && school !== 'N/A' ? `(${school})` : ""}`);
+  if (isPayment) {
+    console.log(`💰 UTR / Txn ID: ${payment?.transactionId || "N/A"}`);
+    console.log(`💵 Amount: ₹500`);
+    console.log(`📅 Payment Date: ${payment?.paymentDate || nowIst}`);
+  } else {
+    console.log(`📱 Mobile Number: ${mobile}`);
+    console.log(`🏫 Class: Class ${studentClass}`);
+    console.log(`📍 Location: ${city} ${school && school !== 'N/A' ? `(${school})` : ""}`);
+  }
   console.log(`⏰ Time: ${nowIst}`);
   console.log(`🌐 IP Address: ${clientIp}`);
   console.log(`======================================================\n`);
@@ -99,7 +106,116 @@ async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }
       }
     });
 
-    const badgeColor = isLogin ? "#10b981" : "#2563eb";
+    let badgeColor = "#2563eb";
+    let title = "A New Student Has Enrolled!";
+    let subject = `[OAV Mantra] 🎓 Enrollment Alert: ${name} (${enrollmentId})`;
+    let rowsHtml = "";
+
+    if (isPayment) {
+      badgeColor = "#f59e0b";
+      title = "Student Submitted ₹500 Payment Claim";
+      subject = `[OAV Mantra] 💰 Payment Claim: ${name} (${enrollmentId}) - UTR: ${payment?.transactionId || "N/A"}`;
+      rowsHtml = `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b; width: 150px;">Student Name:</td>
+          <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">${name}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Enrollment ID:</td>
+          <td style="padding: 10px 0; color: #2563eb; font-weight: bold; font-family: monospace; font-size: 15px;">${enrollmentId}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Transaction / UTR:</td>
+          <td style="padding: 10px 0; color: #b45309; font-weight: bold; font-family: monospace; font-size: 16px; background: #fef3c7; padding: 6px 10px; border-radius: 6px;">${payment?.transactionId || "N/A"}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Amount:</td>
+          <td style="padding: 10px 0; color: #16a34a; font-weight: bold; font-size: 16px;">₹500.00</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Payment Method:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${(payment?.paymentMethod || "UPI").toUpperCase()}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Payment Date:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${payment?.paymentDate || nowIst}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px 0; color: #64748b;">Status:</td>
+          <td style="padding: 10px 0; color: #dc2626; font-weight: bold;">Pending Admin Approval</td>
+        </tr>
+      `;
+    } else if (isLogin) {
+      badgeColor = "#10b981";
+      title = "Student Logged Into Study Room";
+      subject = `[OAV Mantra] 🔑 Login Alert: ${name} (${enrollmentId})`;
+      rowsHtml = `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b; width: 140px;">Student Name:</td>
+          <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">${name}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Enrollment ID:</td>
+          <td style="padding: 10px 0; color: #2563eb; font-weight: bold; font-family: monospace; font-size: 15px;">${enrollmentId}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Mobile:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${mobile}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Class:</td>
+          <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">Class ${studentClass}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">City / District:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${city}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px 0; color: #64748b;">Date & Time:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${nowIst}</td>
+        </tr>
+      `;
+    } else {
+      rowsHtml = `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b; width: 140px;">Student Name:</td>
+          <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">${name}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Enrollment ID:</td>
+          <td style="padding: 10px 0; color: #2563eb; font-weight: bold; font-family: monospace; font-size: 15px;">${enrollmentId}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Mobile Number:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${mobile}</td>
+        </tr>
+        ${email ? `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Email Address:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${email}</td>
+        </tr>` : ""}
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Class:</td>
+          <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">Class ${studentClass}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">School Board:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${schoolType}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">City / District:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${city}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">School:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${school}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px 0; color: #64748b;">Date & Time:</td>
+          <td style="padding: 10px 0; color: #0f172a;">${nowIst}</td>
+        </tr>
+      `;
+    }
 
     const html = `
       <div style="font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #ffffff;">
@@ -111,54 +227,12 @@ async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }
           <div style="display: inline-block; padding: 6px 14px; background: ${badgeColor}; color: #ffffff; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 16px;">
             ${eventLabel}
           </div>
-          <h2 style="margin: 0 0 16px; color: #1e293b; font-size: 18px;">
-            ${isLogin ? 'Student Logged Into Study Room' : 'A New Student Successfully Enrolled!'}
-          </h2>
+          <h2 style="margin: 0 0 16px; color: #1e293b; font-size: 18px;">${title}</h2>
           <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 20px;">
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b; width: 140px;">Student Name:</td>
-              <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">${name}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">Enrollment ID:</td>
-              <td style="padding: 10px 0; color: #2563eb; font-weight: bold; font-family: monospace; font-size: 15px;">${enrollmentId}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">Mobile Number:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${mobile}</td>
-            </tr>
-            ${email ? `
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">Email Address:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${email}</td>
-            </tr>` : ""}
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">Class:</td>
-              <td style="padding: 10px 0; color: #0f172a; font-weight: bold;">Class ${studentClass}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">School Board:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${schoolType}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">City / District:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${city}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">School:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${school}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-              <td style="padding: 10px 0; color: #64748b;">Date & Time:</td>
-              <td style="padding: 10px 0; color: #0f172a;">${nowIst}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 0; color: #64748b;">IP Address:</td>
-              <td style="padding: 10px 0; color: #0f172a; font-family: monospace;">${clientIp}</td>
-            </tr>
+            ${rowsHtml}
           </table>
           <div style="background: #f8fafc; border-radius: 8px; padding: 14px; font-size: 12px; color: #64748b; text-align: center;">
-            This is an automated administrative notification from <strong>OAV Mantra Portal</strong>.
+            Sent automatically to <strong>${ADMIN_NOTIFICATION_EMAIL}</strong>
           </div>
         </div>
       </div>
@@ -167,7 +241,7 @@ async function sendAdminNotificationEmail({ eventType, student, req, extraInfo }
     const info = await transporter.sendMail({
       from: `"OAV Mantra Alerts" <${SMTP_USER}>`,
       to: ADMIN_NOTIFICATION_EMAIL,
-      subject: `[OAV Mantra] ${isLogin ? '🔑 Login Alert' : '🎓 Enrollment Alert'}: ${name} (${enrollmentId})`,
+      subject,
       html
     });
 
@@ -1045,15 +1119,16 @@ const server = http.createServer(async (req, res) => {
     // --- Admin Notification Dispatch Endpoint ---
     if (req.method === "POST" && url.pathname === "/api/notify-admin") {
       const body = await readBody(req);
-      if (body && body.student) {
+      if (body && (body.student || body.payment)) {
         sendAdminNotificationEmail({
           eventType: body.event || "admin_alert",
           student: body.student,
+          payment: body.payment,
           req
         }).catch(err => console.warn("[Email Notification] Notify-admin route error:", err.message));
         return send(res, 200, { success: true, message: "Admin alert queued successfully." });
       }
-      return send(res, 400, { error: "Missing student data for notification." });
+      return send(res, 400, { error: "Missing student or payment data for notification." });
     }
 
     // --- Payment Submission ---
@@ -1077,6 +1152,20 @@ const server = http.createServer(async (req, res) => {
       `).run(student.enrollment_id, tx, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
 
       db.prepare("UPDATE students SET status = 'payment_review' WHERE enrollment_id = ?").run(student.enrollment_id);
+
+      // Asynchronously trigger payment claim notification to admin
+      sendAdminNotificationEmail({
+        eventType: "payment_claim",
+        student,
+        payment: {
+          studentName: student.full_name,
+          enrollmentId: student.enrollment_id,
+          transactionId: tx,
+          paymentDate: paymentDate || new Date().toISOString().slice(0, 10),
+          paymentMethod: method || "quickupi"
+        },
+        req
+      }).catch(err => console.warn("[Email Notification] Payment claim alert error:", err.message));
 
       return send(res, 201, {
         success: true,
