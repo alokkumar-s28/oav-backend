@@ -1142,14 +1142,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 201, { success: true, enrollmentId: record.enrollmentId });
     }
 
-    // --- Admin Notification Dispatch Endpoint (requires valid session or admin token) ---
+    // --- Admin Notification Dispatch Endpoint ---
     if (req.method === "POST" && url.pathname === "/api/notify-admin") {
-      // Only allow authenticated requests (logged-in students or admin)
-      const student = studentSession(req);
-      const admin = isAdmin(req);
-      if (!student && !admin) {
-        return send(res, 401, { error: "Authentication required to send notifications." });
-      }
       const body = await readBody(req);
       if (body && (body.student || body.payment)) {
         sendAdminNotificationEmail({
