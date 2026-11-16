@@ -148,3 +148,10 @@ google-service-account.json
 !google-service-account.example.json
 *.key.json
 
+# SQLite temporary and journal files
+*.db-journal
+*.db-wal
+*.db-shm
+*.db
+
+

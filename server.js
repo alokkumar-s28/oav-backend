@@ -37,10 +37,12 @@ function localSetting(name) {
   return line ? line.slice(line.indexOf("=") + 1).trim().replace(/^['"]|['"]$/g, "") : "";
 }
 
-// --- Admin token with fallback and logging ---
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || localSetting("ADMIN_TOKEN") || "oav-mantra.2026";
-if (!process.env.ADMIN_TOKEN && !localSetting("ADMIN_TOKEN")) {
-  console.warn("⚠️  ADMIN_TOKEN not set. Using default 'oav-mantra.2026' for development.");
+// --- Admin token (MUST be set in .env or environment) ---
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || localSetting("ADMIN_TOKEN") || "";
+if (!ADMIN_TOKEN) {
+  console.error("❌ CRITICAL: ADMIN_TOKEN is not set in .env or environment variables. Admin panel will be inaccessible.");
+} else if (ADMIN_TOKEN.length < 20) {
+  console.warn("⚠️  ADMIN_TOKEN is short (< 20 chars). Use a strong, random token for production.");
 }
 
 // --- Automated Email Notification System ---
@@ -267,7 +269,7 @@ db.exec(`
     school_type TEXT,
     city TEXT NOT NULL,
     school TEXT,
-    status TEXT NOT NULL DEFAULT 'pending_payment' CHECK(status IN ('pending_payment','payment_review','active','suspended')),
+    status TEXT NOT NULL DEFAULT 'pending_payment' CHECK(status IN ('pending_payment','payment_review','active','suspended','rejected')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS payments (
@@ -383,41 +385,34 @@ try {
     db.exec("ALTER TABLE students ADD COLUMN photo TEXT");
   }
 
-  // Clear out any old default fake lessons from previous builds
-  db.exec(`
-    DELETE FROM lessons 
-    WHERE video_url LIKE '%youtube-nocookie.com%'
-       OR video_url LIKE '%5qap5aO4i9A%'
-       OR video_url LIKE '%3G1P20vgggs%'
-       OR video_url LIKE '%ysz5S6PUM-U%'
-       OR video_url LIKE '%kJQP7kiw5Fk%'
-       OR title LIKE 'Knowing Our Numbers%'
-       OR title LIKE 'Whole Numbers%'
-       OR title LIKE 'Components of Food%'
-       OR title LIKE 'Living Organisms%'
-       OR title LIKE 'Parts of Speech%'
-       OR title LIKE 'The Earth in the Solar System%'
-       OR title LIKE 'Integers &%'
-       OR title LIKE 'Simple Equations%'
-       OR title LIKE 'Nutrition in Plants%'
-       OR title LIKE 'Heat, Temperature%'
-       OR title LIKE 'Rational Numbers%'
-       OR title LIKE 'Linear Equations in One Variable%'
-       OR title LIKE 'Crop Production%'
-       OR title LIKE 'Microorganisms:%'
-       OR title LIKE 'Motion:%'
-       OR title LIKE 'Fundamental Unit of Life%'
-       OR title LIKE 'Number Systems%'
-       OR title LIKE 'Polynomials &%'
-       OR title LIKE 'Chemical Reactions%'
-       OR title LIKE 'Life Processes%'
-       OR title LIKE 'Real Numbers%'
-       OR title LIKE 'Trigonometry Basics%'
-       OR title LIKE 'Class % Foundation & Solved Examples'
-       OR title LIKE 'Class % Core Concepts & Experiments'
-       OR title LIKE 'Class % Grammar & Reading Comprehension'
-       OR title LIKE 'Class % Maps, Dates & Geography';
-  `);
+  // Migrate students table CHECK constraint to include 'rejected'
+  const studentSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='students'").get()?.sql || "";
+  if (studentSql.includes("CHECK") && !studentSql.includes("'rejected'")) {
+    console.log("[Migration] Updating students table CHECK constraint to include 'rejected' status...");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS students_migrated (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enrollment_id TEXT NOT NULL UNIQUE,
+        full_name TEXT NOT NULL,
+        mobile TEXT NOT NULL,
+        email TEXT NOT NULL,
+        student_class TEXT NOT NULL,
+        school_type TEXT,
+        city TEXT NOT NULL,
+        school TEXT,
+        status TEXT NOT NULL DEFAULT 'pending_payment' CHECK(status IN ('pending_payment','payment_review','active','suspended','rejected')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        photo TEXT
+      );
+      INSERT INTO students_migrated (id, enrollment_id, full_name, mobile, email, student_class, school_type, city, school, status, created_at, photo)
+      SELECT id, enrollment_id, full_name, mobile, email, student_class, school_type, city, school, status, created_at, photo FROM students;
+      DROP TABLE students;
+      ALTER TABLE students_migrated RENAME TO students;
+    `);
+    console.log("[Migration] ✅ Students table CHECK constraint updated.");
+  }
+
+  // Note: Old default/fake lesson cleanup removed — lessons should be managed via Admin Panel only.
 } catch (err) {
   console.warn("Migration warning:", err.message);
 }
@@ -557,6 +552,10 @@ function allow(req) {
   const now = Date.now();
   const previous = rateLimit.get(key) || [];
   const recent = previous.filter(time => now - time < 60_000);
+  if (recent.length === 0) {
+    rateLimit.delete(key);
+    return true;
+  }
   recent.push(now);
   rateLimit.set(key, recent);
   return recent.length <= 120; // 120 requests per minute
@@ -607,8 +606,21 @@ function getStudent(enrollmentId) {
 
 // --- HTTP server ---
 const server = http.createServer(async (req, res) => {
-  const clientOrigin = req.headers.origin || `http://${req.headers.host || "localhost:3000"}`;
-  res.setHeader("Access-Control-Allow-Origin", clientOrigin);
+  // --- CORS Whitelist ---
+  const ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://oavmantra.vercel.app"
+  ];
+  const clientOrigin = req.headers.origin || "";
+  const isAllowedOrigin = ALLOWED_ORIGINS.includes(clientOrigin) || !clientOrigin;
+  if (isAllowedOrigin && clientOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", clientOrigin);
+  } else if (!clientOrigin) {
+    // Same-origin request (no Origin header) — allow
+    res.setHeader("Access-Control-Allow-Origin", `http://${req.headers.host || "localhost:3000"}`);
+  }
+  // If origin is not allowed, do NOT set Access-Control-Allow-Origin (browser will block)
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Cookie");
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -667,23 +679,8 @@ const server = http.createServer(async (req, res) => {
           AND (mobile = ? OR mobile = ?)
       `).get(enrollmentId, enrollmentId.startsWith("OAV-") ? enrollmentId.replace(/^OAV-/, "") : `OAV-${enrollmentId}`, mobile, rawMobile);
 
-      // 2. Secondary Search: If mobile matched, check if enrollment ID belongs to this student
-      if (!student) {
-        student = db.prepare(`
-          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status 
-          FROM students 
-          WHERE (UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)) OR UPPER(TRIM(enrollment_id)) = UPPER(TRIM(?)))
-        `).get(enrollmentId, enrollmentId.startsWith("OAV-") ? enrollmentId.replace(/^OAV-/, "") : `OAV-${enrollmentId}`);
-      }
-
-      // 3. Fallback Search: If student has their 10-digit mobile number in database
-      if (!student) {
-        student = db.prepare(`
-          SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status 
-          FROM students 
-          WHERE mobile = ?
-        `).get(mobile);
-      }
+      // SECURITY: Only match when BOTH enrollment ID AND mobile number match
+      // (No fallback searches — both fields are required for authentication)
 
       if (!student) {
         return send(res, 401, { error: "No student account found with this Enrollment ID or Mobile Number. Please check your details or enroll on the homepage." });
@@ -908,7 +905,7 @@ const server = http.createServer(async (req, res) => {
         const enrollmentId = matchStatus[1];
         const body = await readBody(req);
         const newStatus = clean(body.status, 20);
-        if (!['active', 'pending_payment', 'payment_review', 'suspended'].includes(newStatus)) {
+        if (!['active', 'pending_payment', 'payment_review', 'suspended', 'rejected'].includes(newStatus)) {
           return send(res, 400, { error: "Invalid status value." });
         }
         db.prepare("UPDATE students SET status = ? WHERE enrollment_id = ?").run(newStatus, enrollmentId);
@@ -1116,8 +1113,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 201, { success: true, enrollmentId: record.enrollmentId });
     }
 
-    // --- Admin Notification Dispatch Endpoint ---
+    // --- Admin Notification Dispatch Endpoint (requires valid session or admin token) ---
     if (req.method === "POST" && url.pathname === "/api/notify-admin") {
+      // Only allow authenticated requests (logged-in students or admin)
+      const student = studentSession(req);
+      const admin = isAdmin(req);
+      if (!student && !admin) {
+        return send(res, 401, { error: "Authentication required to send notifications." });
+      }
       const body = await readBody(req);
       if (body && (body.student || body.payment)) {
         sendAdminNotificationEmail({
@@ -1248,6 +1251,28 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { notes, studentClass });
     }
 
+
+    // --- Get Student Progress (GET) ---
+    if (req.method === "GET" && url.pathname === "/api/progress") {
+      const student = studentSession(req);
+      if (!student) return send(res, 401, { error: "Please log in to view your progress." });
+
+      const totalLessons = db.prepare("SELECT COUNT(*) AS count FROM lessons WHERE student_class = ?").get(student.student_class).count;
+      const completedRows = db.prepare(`
+        SELECT lp.lesson_id FROM lesson_progress lp
+        JOIN lessons l ON l.id = lp.lesson_id
+        WHERE lp.enrollment_id = ? AND l.student_class = ?
+      `).all(student.enrollment_id, student.student_class);
+      const quizRows = db.prepare("SELECT id, subject, score, total, created_at FROM quiz_results WHERE enrollment_id = ? ORDER BY id DESC").all(student.enrollment_id);
+
+      return send(res, 200, {
+        completed_lesson_ids: completedRows.map(r => r.lesson_id),
+        quiz_results: quizRows,
+        totalLessons,
+        completedLessons: completedRows.length,
+        percentage: totalLessons > 0 ? Math.round((completedRows.length / totalLessons) * 100) : 0
+      });
+    }
 
     // --- Mark Lesson Progress ---
     if (req.method === "POST" && url.pathname === "/api/progress") {
@@ -1380,7 +1405,7 @@ Port ${PORT} is currently active and serving the OAV Mantra platform.
 
 
 🌐 Open Website:    http://localhost:${PORT}/index.html
-🔐 Admin Control:   http://localhost:${PORT}/admin.html (Token: admin123)
+🔐 Admin Control:   http://localhost:${PORT}/admin.html (use ADMIN_TOKEN from .env)
 📚 Student Portal:  http://localhost:${PORT}/dashboard.html
 
 💡 If you want to restart the server, simply close any other open
@@ -1401,7 +1426,7 @@ server.listen(PORT, () => {
 ============================================================
 🌐 Website URL:     http://localhost:${PORT}/index.html
 🔐 Admin Panel:     http://localhost:${PORT}/admin.html
-🔑 Admin Password:  admin123
+🔑 Admin Token:     Set via ADMIN_TOKEN in .env
 📚 Database:        database/oav-mantra.db (SQLite Secure)
 ============================================================
 `);
