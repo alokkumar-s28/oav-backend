@@ -590,8 +590,11 @@ function allow(req) {
   return recent.length <= 120; // 120 requests per minute
 }
 
-function isAdmin(req) {
-  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+function isAdmin(req, url) {
+  let supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!supplied && url) {
+    supplied = String(url.searchParams.get("token") || "").trim();
+  }
   if (!ADMIN_TOKEN || supplied.length !== ADMIN_TOKEN.length) return false;
   return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(ADMIN_TOKEN));
 }
@@ -845,7 +848,7 @@ const server = http.createServer(async (req, res) => {
 
     // --- Admin API endpoints ---
     if (url.pathname.startsWith("/api/admin/")) {
-      if (!isAdmin(req)) return send(res, 401, { error: "Administrator authentication required." });
+      if (!isAdmin(req, url)) return send(res, 401, { error: "Administrator authentication required." });
 
       // Admin Overview Stats
       if (req.method === "GET" && url.pathname === "/api/admin/overview") {
@@ -1071,7 +1074,36 @@ const server = http.createServer(async (req, res) => {
           LEFT JOIN payments p ON p.enrollment_id = s.enrollment_id
           ORDER BY s.created_at DESC
         `).all();
-        return send(res, 200, { data: rows });
+
+        const headers = ["Enrollment ID", "Full Name", "Mobile", "Email", "Class", "School Board", "City/District", "School Name", "Student Status", "Registration Date", "Transaction ID", "Fee Amount", "Payment Date", "Payment Method", "Payment Status"];
+        const csvLines = [headers.join(",")];
+        for (const r of rows) {
+          const esc = val => `"${String(val ?? "").replace(/"/g, '""')}"`;
+          csvLines.push([
+            esc(r.enrollment_id),
+            esc(r.full_name),
+            esc(r.mobile),
+            esc(r.email),
+            esc(`Class ${r.student_class || ""}`),
+            esc(r.school_type || "Normal"),
+            esc(r.city),
+            esc(r.school),
+            esc(r.status),
+            esc(r.created_at),
+            esc(r.transaction_id || "None"),
+            esc(r.amount || 500),
+            esc(r.payment_date || ""),
+            esc(r.payment_method || ""),
+            esc(r.payment_status || "")
+          ].join(","));
+        }
+
+        const csvData = "\uFEFF" + csvLines.join("\r\n");
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="OAV_Mantra_Records.csv"'
+        });
+        return res.end(csvData);
       }
 
 
