@@ -276,7 +276,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     enrollment_id TEXT NOT NULL,
     amount INTEGER NOT NULL CHECK(amount > 0),
-    transaction_id TEXT NOT NULL UNIQUE,
+    transaction_id TEXT,
+    payment_screenshot TEXT,
     payment_date TEXT NOT NULL,
     payment_method TEXT NOT NULL CHECK(payment_method IN ('quickupi','qr')),
     status TEXT NOT NULL DEFAULT 'pending_verification' CHECK(status IN ('pending_verification','verified','rejected')),
@@ -413,6 +414,34 @@ try {
   }
 
   // Note: Old default/fake lesson cleanup removed — lessons should be managed via Admin Panel only.
+
+  // Migrate payments table: add payment_screenshot column and relax transaction_id constraint
+  const paymentCols = db.prepare("PRAGMA table_info(payments)").all().map(c => c.name);
+  if (!paymentCols.includes("payment_screenshot")) {
+    console.log("[Migration] Adding payment_screenshot column and relaxing transaction_id constraint...");
+    const paymentSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='payments'").get()?.sql || "";
+    if (paymentSql.includes("NOT NULL UNIQUE") || !paymentSql.includes("payment_screenshot")) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS payments_migrated (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          enrollment_id TEXT NOT NULL,
+          amount INTEGER NOT NULL CHECK(amount > 0),
+          transaction_id TEXT,
+          payment_screenshot TEXT,
+          payment_date TEXT NOT NULL,
+          payment_method TEXT NOT NULL CHECK(payment_method IN ('quickupi','qr')),
+          status TEXT NOT NULL DEFAULT 'pending_verification' CHECK(status IN ('pending_verification','verified','rejected')),
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(enrollment_id) REFERENCES students(enrollment_id)
+        );
+        INSERT INTO payments_migrated (id, enrollment_id, amount, transaction_id, payment_date, payment_method, status, created_at)
+        SELECT id, enrollment_id, amount, transaction_id, payment_date, payment_method, status, created_at FROM payments;
+        DROP TABLE payments;
+        ALTER TABLE payments_migrated RENAME TO payments;
+      `);
+      console.log("[Migration] ✅ Payments table updated with screenshot support.");
+    }
+  }
 } catch (err) {
   console.warn("Migration warning:", err.message);
 }
@@ -839,7 +868,7 @@ const server = http.createServer(async (req, res) => {
       // Admin Payments List
       if (req.method === "GET" && url.pathname === "/api/admin/payments") {
         const payments = db.prepare(`
-          SELECT p.id, p.amount, p.transaction_id, p.payment_date, p.payment_method, p.status,
+          SELECT p.id, p.amount, p.transaction_id, p.payment_screenshot, p.payment_date, p.payment_method, p.status,
                  s.enrollment_id, s.full_name, s.student_class, s.mobile, s.city, s.photo
           FROM payments p
           JOIN students s ON s.enrollment_id = p.enrollment_id
@@ -1136,23 +1165,30 @@ const server = http.createServer(async (req, res) => {
 
     // --- Payment Submission ---
     if (req.method === "POST" && url.pathname === "/api/payments") {
-      const body = await readBody(req);
+      const body = await readBody(req, 6_000_000); // Allow larger payload for screenshot
       const rawEnrollment = clean(body.enrollmentId, 40);
       const tx = clean(body.transactionId, 80);
       const paymentDate = clean(body.paymentDate, 10);
       const method = clean(body.paymentMethod, 15);
+      const screenshot = typeof body.paymentScreenshot === "string" && body.paymentScreenshot.startsWith("data:image/")
+        ? body.paymentScreenshot.slice(0, 500_000) // Max ~500KB base64
+        : "";
 
       const student = getStudent(rawEnrollment);
       if (!student) return send(res, 404, { error: "Enrollment record not found. Please verify your Enrollment ID or enroll on the homepage." });
 
-      if (!tx || tx.length < 5) {
-        return send(res, 400, { error: "Please enter a valid Transaction / UTR reference number (at least 5 characters)." });
+      // At least one of transaction ID or payment screenshot is required
+      const hasTx = tx && tx.length >= 5;
+      const hasScreenshot = screenshot.length > 0;
+
+      if (!hasTx && !hasScreenshot) {
+        return send(res, 400, { error: "Please provide a Transaction / UTR reference number (at least 5 characters) OR upload a payment screenshot. At least one is required." });
       }
 
       db.prepare(`
-        INSERT INTO payments (enrollment_id, amount, transaction_id, payment_date, payment_method)
-        VALUES (?, 500, ?, ?, ?)
-      `).run(student.enrollment_id, tx, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
+        INSERT INTO payments (enrollment_id, amount, transaction_id, payment_screenshot, payment_date, payment_method)
+        VALUES (?, 500, ?, ?, ?, ?)
+      `).run(student.enrollment_id, hasTx ? tx : null, hasScreenshot ? screenshot : null, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
 
       db.prepare("UPDATE students SET status = 'payment_review' WHERE enrollment_id = ?").run(student.enrollment_id);
 
@@ -1163,9 +1199,10 @@ const server = http.createServer(async (req, res) => {
         payment: {
           studentName: student.full_name,
           enrollmentId: student.enrollment_id,
-          transactionId: tx,
+          transactionId: hasTx ? tx : "(Not provided — screenshot attached)",
           paymentDate: paymentDate || new Date().toISOString().slice(0, 10),
-          paymentMethod: method || "quickupi"
+          paymentMethod: method || "quickupi",
+          hasScreenshot: hasScreenshot
         },
         req
       }).catch(err => console.warn("[Email Notification] Payment claim alert error:", err.message));
