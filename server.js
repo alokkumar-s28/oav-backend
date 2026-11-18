@@ -114,9 +114,13 @@ async function sendAdminNotificationEmail({ eventType, student, payment, req, ex
     let rowsHtml = "";
 
     if (isPayment) {
+      const hasScreenshot = Boolean(payment?.hasScreenshot || payment?.paymentScreenshot);
+      const hasTx = payment?.transactionId && payment.transactionId !== "N/A" && !payment.transactionId.includes("Not provided");
+      const proofSummary = hasScreenshot ? (hasTx ? `UTR: ${payment.transactionId} + 📸 Screenshot` : `📸 Screenshot Attached`) : `UTR: ${payment?.transactionId || "N/A"}`;
+
       badgeColor = "#f59e0b";
       title = "Student Submitted ₹500 Payment Claim";
-      subject = `[OAV Mantra] 💰 Payment Claim: ${name} (${enrollmentId}) - UTR: ${payment?.transactionId || "N/A"}`;
+      subject = `[OAV Mantra] 💰 Payment Claim: ${name} (${enrollmentId}) - ${proofSummary}`;
       rowsHtml = `
         <tr style="border-bottom: 1px solid #f1f5f9;">
           <td style="padding: 10px 0; color: #64748b; width: 150px;">Student Name:</td>
@@ -129,6 +133,12 @@ async function sendAdminNotificationEmail({ eventType, student, payment, req, ex
         <tr style="border-bottom: 1px solid #f1f5f9;">
           <td style="padding: 10px 0; color: #64748b;">Transaction / UTR:</td>
           <td style="padding: 10px 0; color: #b45309; font-weight: bold; font-family: monospace; font-size: 16px; background: #fef3c7; padding: 6px 10px; border-radius: 6px;">${payment?.transactionId || "N/A"}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px 0; color: #64748b;">Payment Proof:</td>
+          <td style="padding: 10px 0; font-weight: bold; color: ${hasScreenshot ? '#059669' : '#64748b'};">
+            ${hasScreenshot ? '✅ Payment Screenshot Uploaded (View in Admin Panel)' : 'UTR Reference Only'}
+          </td>
         </tr>
         <tr style="border-bottom: 1px solid #f1f5f9;">
           <td style="padding: 10px 0; color: #64748b;">Amount:</td>
@@ -659,6 +669,8 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -1134,8 +1146,12 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Check if student already enrolled
-      const existing = db.prepare("SELECT enrollment_id FROM students WHERE mobile = ? OR email = ?").get(record.mobile, record.email);
+      const existing = db.prepare("SELECT enrollment_id, status FROM students WHERE mobile = ? OR email = ?").get(record.mobile, record.email);
       if (existing) {
+        if (existing.status === 'active' || existing.status === 'verified') {
+          return send(res, 409, { error: "An active student account is already registered with this mobile number or email. Please log in directly to your study room dashboard." });
+        }
+
         // Update details
         db.prepare(`
           UPDATE students SET full_name = ?, student_class = ?, school_type = ?, city = ?, school = ?
