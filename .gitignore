@@ -154,5 +154,7 @@ google-service-account.json
 *.db-shm
 *.db
 all_students_table.json
+supabase/.temp/
+.temp/
 
 
