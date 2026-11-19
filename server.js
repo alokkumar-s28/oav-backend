@@ -965,6 +965,45 @@ const server = http.createServer(async (req, res) => {
       }
 
 
+      // Admin Google Drive Configuration & Status
+      if (req.method === "GET" && url.pathname === "/api/admin/drive-config") {
+        const webhookUrl = process.env.GOOGLE_DRIVE_WEBHOOK_URL || localSetting("GOOGLE_DRIVE_WEBHOOK_URL") || "";
+        const isConfigured = isGoogleDriveConfigured();
+        return send(res, 200, {
+          configured: isConfigured,
+          webhookUrl: webhookUrl ? `${webhookUrl.slice(0, 35)}...${webhookUrl.slice(-10)}` : "",
+          fullWebhookUrl: webhookUrl,
+          method: webhookUrl ? "Google Apps Script Webhook" : (isConfigured ? "Service Account API" : "None")
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/drive-config") {
+        const body = await readBody(req);
+        const webhookUrl = clean(body.webhookUrl, 300);
+        if (!webhookUrl || !webhookUrl.startsWith("https://script.google.com/")) {
+          return send(res, 400, { error: "Please enter a valid Google Apps Script Web App URL (starting with https://script.google.com/)." });
+        }
+
+        // Update .env file
+        const configPath = path.join(BACKEND_ROOT, ".env");
+        if (fs.existsSync(configPath)) {
+          let envContent = fs.readFileSync(configPath, "utf8");
+          if (envContent.includes("GOOGLE_DRIVE_WEBHOOK_URL=")) {
+            envContent = envContent.replace(/GOOGLE_DRIVE_WEBHOOK_URL=.*/, `GOOGLE_DRIVE_WEBHOOK_URL=${webhookUrl}`);
+          } else {
+            envContent += `\nGOOGLE_DRIVE_WEBHOOK_URL=${webhookUrl}\n`;
+          }
+          fs.writeFileSync(configPath, envContent, "utf8");
+        }
+        process.env.GOOGLE_DRIVE_WEBHOOK_URL = webhookUrl;
+
+        return send(res, 200, {
+          success: true,
+          configured: true,
+          message: "Google Drive Webhook URL saved successfully."
+        });
+      }
+
       // Admin Update Student Status
       const matchStatus = url.pathname.match(/^\/api\/admin\/students\/([A-Za-z0-9-]+)\/status$/);
       if (req.method === "POST" && matchStatus) {
