@@ -5,7 +5,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
-const { isGoogleDriveConfigured, uploadStudentPhotoToDrive } = require("./google-drive.js");
+const {
+  isGoogleDriveConfigured,
+  uploadStudentPhotoToDrive,
+  uploadPaymentScreenshotToDrive
+} = require("./google-drive.js");
 
 const PORT = Number(process.env.PORT || 3000);
 const BACKEND_ROOT = __dirname;
@@ -137,7 +141,7 @@ async function sendAdminNotificationEmail({ eventType, student, payment, req, ex
         <tr style="border-bottom: 1px solid #f1f5f9;">
           <td style="padding: 10px 0; color: #64748b;">Payment Proof:</td>
           <td style="padding: 10px 0; font-weight: bold; color: ${hasScreenshot ? '#059669' : '#64748b'};">
-            ${hasScreenshot ? '✅ Payment Screenshot Uploaded (View in Admin Panel)' : 'UTR Reference Only'}
+            ${hasScreenshot ? (payment?.driveFileUrl ? `✅ Screenshot Saved in Google Drive (<a href="${payment.driveFileUrl}" target="_blank" rel="noopener" style="color:#2563eb; text-decoration:underline;">Open in Google Drive</a>)` : '✅ Payment Screenshot Uploaded (View in Admin Panel)') : 'UTR Reference Only'}
           </td>
         </tr>
         <tr style="border-bottom: 1px solid #f1f5f9;">
@@ -451,6 +455,19 @@ try {
       `);
       console.log("[Migration] ✅ Payments table updated with screenshot support.");
     }
+  }
+
+  // Ensure Google Drive storage URL columns exist on payments and students tables
+  const currentPayCols = db.prepare("PRAGMA table_info(payments)").all().map(c => c.name);
+  if (!currentPayCols.includes("drive_file_url")) {
+    db.exec("ALTER TABLE payments ADD COLUMN drive_file_url TEXT");
+    console.log("[Migration] ✅ Added drive_file_url column to payments table.");
+  }
+
+  const currentStudentCols = db.prepare("PRAGMA table_info(students)").all().map(c => c.name);
+  if (!currentStudentCols.includes("drive_photo_url")) {
+    db.exec("ALTER TABLE students ADD COLUMN drive_photo_url TEXT");
+    console.log("[Migration] ✅ Added drive_photo_url column to students table.");
   }
 } catch (err) {
   console.warn("Migration warning:", err.message);
@@ -794,10 +811,13 @@ const server = http.createServer(async (req, res) => {
 
     // --- Student Photo Upload (Compressed Avatar + Google Drive Storage) ---
     if (req.method === "POST" && url.pathname === "/api/student/photo") {
-      const student = studentSession(req);
+      const body = await readBody(req, 6_000_000);
+      let student = studentSession(req);
+      if (!student && body && body.enrollmentId) {
+        student = getStudent(body.enrollmentId);
+      }
       if (!student) return send(res, 401, { error: "Please log in to update your photo." });
 
-      const body = await readBody(req, 6_000_000);
       const photo = typeof body.photo === "string" ? body.photo.slice(0, 300_000) : "";
       const highResPhoto = typeof body.highResPhoto === "string" ? body.highResPhoto : (typeof body.originalPhoto === "string" ? body.originalPhoto : photo);
 
@@ -818,7 +838,7 @@ const server = http.createServer(async (req, res) => {
             enrollmentId: student.enrollment_id,
             studentClass: student.student_class
           });
-          console.log(`[Google Drive] Photo uploaded for ${student.enrollment_id} (${driveResult.fileName}) -> File ID: ${driveResult.fileId}`);
+          console.log(`[Google Drive] Photo uploaded for ${student.enrollment_id} (${driveResult.fileName}) -> File ID: ${driveResult.fileId || 'N/A'}`);
         } catch (err) {
           console.error(`[Google Drive] Upload failed for ${student.enrollment_id}:`, err.message);
           driveError = err.message;
@@ -828,18 +848,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Save student photo in database so it ALWAYS appears in Admin Panel
+      const drivePhotoUrl = driveResult ? (driveResult.webViewLink || driveResult.fileUrl) : null;
       const photoToSave = (highResPhoto && highResPhoto.startsWith("data:image/")) 
         ? highResPhoto 
-        : ((photo && photo.startsWith("data:image/")) ? photo : (driveResult ? driveResult.webViewLink : ""));
+        : ((photo && photo.startsWith("data:image/")) ? photo : (drivePhotoUrl || ""));
       const cleanId = String(student.enrollment_id).trim().toUpperCase();
       const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
-      db.prepare("UPDATE students SET photo = ? WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?").run(photoToSave, cleanId, altId);
+      db.prepare("UPDATE students SET photo = ?, drive_photo_url = COALESCE(?, drive_photo_url) WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?")
+        .run(photoToSave, drivePhotoUrl, cleanId, altId);
 
       return send(res, 200, {
         success: true,
         photo: photoToSave,
         driveUploaded: Boolean(driveResult),
-        driveFileUrl: driveResult ? driveResult.webViewLink : null,
+        driveFileUrl: drivePhotoUrl,
         driveFileName: driveResult ? driveResult.fileName : null,
         driveConfigured: isGoogleDriveConfigured(),
         driveError: driveError
@@ -883,8 +905,8 @@ const server = http.createServer(async (req, res) => {
       // Admin Payments List
       if (req.method === "GET" && url.pathname === "/api/admin/payments") {
         const payments = db.prepare(`
-          SELECT p.id, p.amount, p.transaction_id, p.payment_screenshot, p.payment_date, p.payment_method, p.status,
-                 s.enrollment_id, s.full_name, s.student_class, s.mobile, s.city, s.photo
+          SELECT p.id, p.amount, p.transaction_id, p.payment_screenshot, p.drive_file_url, p.payment_date, p.payment_method, p.status,
+                 s.enrollment_id, s.full_name, s.student_class, s.mobile, s.city, s.photo, s.drive_photo_url
           FROM payments p
           JOIN students s ON s.enrollment_id = p.enrollment_id
           ORDER BY p.id DESC
@@ -898,7 +920,7 @@ const server = http.createServer(async (req, res) => {
         const classFilter = clean(url.searchParams.get("class"), 10);
         const statusFilter = clean(url.searchParams.get("status"), 20);
 
-        let sql = `SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, status, created_at FROM students WHERE 1=1`;
+        let sql = `SELECT enrollment_id, full_name, mobile, email, student_class, school_type, city, school, photo, drive_photo_url, status, created_at FROM students WHERE 1=1`;
         const params = [];
 
         if (query) {
@@ -1227,10 +1249,35 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: "Please provide a Transaction / UTR reference number (at least 5 characters) OR upload a payment screenshot. At least one is required." });
       }
 
+      // Upload payment screenshot to Google Drive if configured
+      let driveProofResult = null;
+      let driveProofError = null;
+      if (isGoogleDriveConfigured() && hasScreenshot) {
+        try {
+          driveProofResult = await uploadPaymentScreenshotToDrive({
+            screenshotData: screenshot,
+            studentName: student.full_name,
+            enrollmentId: student.enrollment_id,
+            transactionId: hasTx ? tx : "SCREENSHOT_PROOF",
+            studentClass: student.student_class,
+            amount: 500,
+            paymentDate: paymentDate || new Date().toISOString().slice(0, 10)
+          });
+          console.log(`[Google Drive] Payment proof uploaded for ${student.enrollment_id} (${driveProofResult.fileName}) -> ${driveProofResult.webViewLink || driveProofResult.fileUrl}`);
+        } catch (err) {
+          console.error(`[Google Drive] Payment proof upload failed for ${student.enrollment_id}:`, err.message);
+          driveProofError = err.message;
+        }
+      } else if (hasScreenshot) {
+        console.log(`[Google Drive] Skipped payment proof upload for ${student.enrollment_id}: Google Drive is not configured.`);
+      }
+
+      const driveProofUrl = driveProofResult ? (driveProofResult.webViewLink || driveProofResult.fileUrl) : null;
+
       db.prepare(`
-        INSERT INTO payments (enrollment_id, amount, transaction_id, payment_screenshot, payment_date, payment_method)
-        VALUES (?, 500, ?, ?, ?, ?)
-      `).run(student.enrollment_id, hasTx ? tx : null, hasScreenshot ? screenshot : null, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
+        INSERT INTO payments (enrollment_id, amount, transaction_id, payment_screenshot, drive_file_url, payment_date, payment_method)
+        VALUES (?, 500, ?, ?, ?, ?, ?)
+      `).run(student.enrollment_id, hasTx ? tx : null, hasScreenshot ? screenshot : null, driveProofUrl, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
 
       db.prepare("UPDATE students SET status = 'payment_review' WHERE enrollment_id = ?").run(student.enrollment_id);
 
@@ -1244,7 +1291,8 @@ const server = http.createServer(async (req, res) => {
           transactionId: hasTx ? tx : "(Not provided — screenshot attached)",
           paymentDate: paymentDate || new Date().toISOString().slice(0, 10),
           paymentMethod: method || "quickupi",
-          hasScreenshot: hasScreenshot
+          hasScreenshot: hasScreenshot,
+          driveFileUrl: driveProofUrl
         },
         req
       }).catch(err => console.warn("[Email Notification] Payment claim alert error:", err.message));
@@ -1252,6 +1300,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 201, {
         success: true,
         status: "pending_verification",
+        driveUploaded: Boolean(driveProofResult),
+        driveFileUrl: driveProofUrl,
         redirect: `login.html?enrollment=${encodeURIComponent(student.enrollment_id)}&mobile=${encodeURIComponent(student.mobile)}&status=review`
       });
     }

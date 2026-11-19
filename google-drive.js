@@ -3,27 +3,47 @@
 const fs = require("fs");
 const path = require("path");
 const { Readable } = require("stream");
-const { google } = require("googleapis");
+let google = null;
+try {
+  google = require("googleapis").google;
+} catch (e) {
+  // googleapis optional if using webhook mode
+}
 
 let driveClient = null;
-let cachedFolderId = null;
+
+function readEnvSetting(name) {
+  if (process.env[name]) return process.env[name];
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return "";
+  try {
+    const line = fs.readFileSync(envPath, "utf8")
+      .split(/\r?\n/)
+      .find(item => item.trim().startsWith(`${name}=`));
+    return line ? line.slice(line.indexOf("=") + 1).trim().replace(/^['"]|['"]$/g, "") : "";
+  } catch (e) {
+    return "";
+  }
+}
 
 /**
  * Loads service account credentials from file or environment variable.
  */
 function getCredentials() {
   // Option 1: Inline JSON in environment variable (great for cloud hosts like Vercel / Render)
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+  const envKey = readEnvSetting("GOOGLE_SERVICE_ACCOUNT_KEY");
+  if (envKey) {
     try {
-      return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+      return JSON.parse(envKey);
     } catch (e) {
       console.error("[Google Drive] Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY JSON:", e.message);
     }
   }
 
   // Option 2: Path in GOOGLE_APPLICATION_CREDENTIALS
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    const credPath = path.resolve(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+  const appCredsPath = readEnvSetting("GOOGLE_APPLICATION_CREDENTIALS");
+  if (appCredsPath) {
+    const credPath = path.resolve(appCredsPath);
     if (fs.existsSync(credPath)) {
       try {
         return JSON.parse(fs.readFileSync(credPath, "utf8"));
@@ -46,13 +66,28 @@ function getCredentials() {
   return null;
 }
 
+function getWebhookUrl() {
+  const url = readEnvSetting("GOOGLE_DRIVE_WEBHOOK_URL");
+  return url && url.startsWith("https://") ? url : "";
+}
+
+function getFolderId(type = "photos") {
+  if (type === "payments") {
+    const payFolder = readEnvSetting("GOOGLE_DRIVE_PAYMENTS_FOLDER_ID");
+    if (payFolder && payFolder !== "your_google_drive_folder_id_here") return payFolder;
+  }
+  const folder = readEnvSetting("GOOGLE_DRIVE_FOLDER_ID");
+  return folder && folder !== "your_google_drive_folder_id_here" ? folder : "";
+}
+
 /**
- * Returns true if Google Drive service account and folder ID are configured.
+ * Returns true if Google Drive service account or Google Apps Script Webhook is configured.
  */
 function isGoogleDriveConfigured() {
+  if (getWebhookUrl()) return true;
   const creds = getCredentials();
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  return Boolean(creds && folderId && folderId !== "your_google_drive_folder_id_here");
+  const folderId = getFolderId();
+  return Boolean(creds && folderId);
 }
 
 /**
@@ -60,10 +95,13 @@ function isGoogleDriveConfigured() {
  */
 function getDriveClient() {
   if (driveClient) return driveClient;
+  if (!google) {
+    throw new Error("googleapis package not installed. Required for Service Account mode.");
+  }
 
   const credentials = getCredentials();
   if (!credentials) {
-    throw new Error("Google Drive Service Account credentials not found. Please provide google-service-account.json or set GOOGLE_SERVICE_ACCOUNT_KEY.");
+    throw new Error("Google Drive Service Account credentials not found. Please provide google-service-account.json or set GOOGLE_DRIVE_WEBHOOK_URL.");
   }
 
   const auth = new google.auth.GoogleAuth({
@@ -76,62 +114,174 @@ function getDriveClient() {
 }
 
 /**
- * Uploads a student photo Buffer or Base64 string directly to Google Drive.
- * 
- * @param {Object} params
- * @param {Buffer|string} params.photoData - Buffer or base64 data:image string
- * @param {string} params.studentName - Full student name
- * @param {string} params.enrollmentId - Student enrollment ID
- * @param {string} [params.studentClass] - Student class (e.g. VI, VII, VIII, IX, X)
- * @returns {Promise<{fileId: string, fileName: string, webViewLink: string}>}
+ * Parses buffer or base64 data:image strings.
  */
-async function uploadStudentPhotoToDrive({ photoData, studentName, enrollmentId, studentClass }) {
-  const drive = getDriveClient();
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-
+function parseMedia(mediaData) {
   let buffer;
   let mimeType = "image/jpeg";
+  let base64String = "";
 
-  if (Buffer.isBuffer(photoData)) {
-    buffer = photoData;
-  } else if (typeof photoData === "string") {
-    const match = photoData.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+  if (Buffer.isBuffer(mediaData)) {
+    buffer = mediaData;
+    base64String = mediaData.toString("base64");
+  } else if (typeof mediaData === "string") {
+    const match = mediaData.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
     if (match) {
       mimeType = match[1];
+      base64String = match[2];
       buffer = Buffer.from(match[2], "base64");
     } else {
-      buffer = Buffer.from(photoData, "base64");
+      base64String = mediaData;
+      buffer = Buffer.from(mediaData, "base64");
     }
   } else {
-    throw new Error("Invalid photoData supplied to Google Drive uploader.");
+    throw new Error("Invalid mediaData supplied: Expected Buffer or Base64 string.");
   }
 
-  // Build clean, professional filename e.g.: OAV-123456_Alok_Kumar_Class_X_Photo.jpg
+  let ext = "jpg";
+  if (mimeType.includes("png")) ext = "png";
+  else if (mimeType.includes("webp")) ext = "webp";
+  else if (mimeType.includes("pdf")) ext = "pdf";
+
+  return { buffer, mimeType, ext, base64String };
+}
+
+/**
+ * Uploads media via Google Apps Script Webhook directly into OAV Mantra Google Drive.
+ */
+async function uploadViaWebhook(payload) {
+  const webhookUrl = getWebhookUrl();
+  if (!webhookUrl) throw new Error("GOOGLE_DRIVE_WEBHOOK_URL not configured");
+
+  const res = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.success) {
+    throw new Error(data.error || `Webhook upload failed with status ${res.status}`);
+  }
+
+  return {
+    fileId: data.fileId || "gdrive-webhook-" + Date.now(),
+    fileName: data.fileName || payload.fileName,
+    webViewLink: data.fileUrl || data.webViewLink || data.url || "",
+    webContentLink: data.downloadUrl || data.webContentLink || data.url || ""
+  };
+}
+
+/**
+ * Uploads a student photo to Google Drive (via Service Account or Webhook).
+ */
+async function uploadStudentPhotoToDrive({ photoData, studentName, enrollmentId, studentClass }) {
+  const { buffer, mimeType, ext, base64String } = parseMedia(photoData);
+
   const safeName = (studentName || "Student").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
   const safeId = (enrollmentId || "UNKNOWN").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
   const safeClass = (studentClass || "").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
-  const ext = mimeType.includes("png") ? "png" : "jpg";
-  const fileName = `${safeId}_${safeName}${safeClass ? `_Class_${safeClass}` : ""}_Photo.${ext}`;
+  const fileName = `PHOTO_${safeId}_${safeName}${safeClass ? `_Class_${safeClass}` : ""}.${ext}`;
+  const description = `Student Identity Photo for ${studentName} (Enrollment: ${enrollmentId}, Class: ${studentClass || "N/A"})`;
 
-  // Create stream from buffer
+  // 1. Try Google Apps Script Webhook first if configured
+  if (getWebhookUrl()) {
+    try {
+      return await uploadViaWebhook({
+        folderType: "photos",
+        fileName,
+        mimeType,
+        base64Data: base64String,
+        studentName,
+        enrollmentId,
+        studentClass,
+        description
+      });
+    } catch (err) {
+      console.warn("[Google Drive] Webhook upload failed, attempting Service Account fallback:", err.message);
+    }
+  }
+
+  // 2. Use official Google Drive API via Service Account
+  const drive = getDriveClient();
+  const folderId = getFolderId("photos");
+
   const stream = new Readable();
   stream.push(buffer);
   stream.push(null);
 
   const fileMetadata = {
     name: fileName,
-    description: `Student Identity Photo for ${studentName} (Enrollment: ${enrollmentId}, Class: ${studentClass || "N/A"})`,
+    description,
     parents: folderId ? [folderId] : []
-  };
-
-  const media = {
-    mimeType: mimeType,
-    body: stream
   };
 
   const response = await drive.files.create({
     requestBody: fileMetadata,
-    media: media,
+    media: { mimeType, body: stream },
+    fields: "id, name, webViewLink, webContentLink"
+  });
+
+  return {
+    fileId: response.data.id,
+    fileName: response.data.name,
+    webViewLink: response.data.webViewLink,
+    webContentLink: response.data.webContentLink
+  };
+}
+
+/**
+ * Uploads a payment proof screenshot to Google Drive (via Service Account or Webhook).
+ */
+async function uploadPaymentScreenshotToDrive({ screenshotData, studentName, enrollmentId, transactionId, studentClass, amount, paymentDate }) {
+  const { buffer, mimeType, ext, base64String } = parseMedia(screenshotData);
+
+  const safeName = (studentName || "Student").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeId = (enrollmentId || "UNKNOWN").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeTx = (transactionId || "NoUTR").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
+  const safeDate = (paymentDate || new Date().toISOString().slice(0, 10)).replace(/[^0-9-]/g, "");
+
+  const fileName = `PAYMENT_PROOF_${safeId}_${safeName}_UTR_${safeTx}_${safeDate}.${ext}`;
+  const description = `Payment Proof Screenshot (₹${amount || 500}) for ${studentName} (Enrollment: ${enrollmentId}) - UTR: ${transactionId || "N/A"}`;
+
+  // 1. Try Google Apps Script Webhook first if configured
+  if (getWebhookUrl()) {
+    try {
+      return await uploadViaWebhook({
+        folderType: "payments",
+        fileName,
+        mimeType,
+        base64Data: base64String,
+        studentName,
+        enrollmentId,
+        transactionId,
+        studentClass,
+        amount: amount || 500,
+        paymentDate: safeDate,
+        description
+      });
+    } catch (err) {
+      console.warn("[Google Drive] Webhook payment upload failed, attempting Service Account fallback:", err.message);
+    }
+  }
+
+  // 2. Use official Google Drive API via Service Account
+  const drive = getDriveClient();
+  const folderId = getFolderId("payments");
+
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+
+  const fileMetadata = {
+    name: fileName,
+    description,
+    parents: folderId ? [folderId] : []
+  };
+
+  const response = await drive.files.create({
+    requestBody: fileMetadata,
+    media: { mimeType, body: stream },
     fields: "id, name, webViewLink, webContentLink"
   });
 
@@ -146,5 +296,8 @@ async function uploadStudentPhotoToDrive({ photoData, studentName, enrollmentId,
 module.exports = {
   isGoogleDriveConfigured,
   uploadStudentPhotoToDrive,
-  getCredentials
+  uploadPaymentScreenshotToDrive,
+  getCredentials,
+  getWebhookUrl,
+  getFolderId
 };
