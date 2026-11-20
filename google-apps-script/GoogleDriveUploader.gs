@@ -205,18 +205,20 @@ function doGet(e) {
 
 function getOrCreateFolder(folderName) {
   var folders = DriveApp.getFoldersByName(folderName);
-  if (folders.hasNext()) {
-    return folders.next();
-  }
-  return DriveApp.createFolder(folderName);
+  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+  try {
+    folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {}
+  return folder;
 }
 
 function getOrCreateSubFolder(parentFolder, subFolderName) {
   var folders = parentFolder.getFoldersByName(subFolderName);
-  if (folders.hasNext()) {
-    return folders.next();
-  }
-  return parentFolder.createFolder(subFolderName);
+  var folder = folders.hasNext() ? folders.next() : parentFolder.createFolder(subFolderName);
+  try {
+    folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {}
+  return folder;
 }
 
 function createJsonResponse(obj, statusCode) {
