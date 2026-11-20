@@ -119,12 +119,14 @@ serve(async (req: Request) => {
       // Upload payment screenshot to Google Drive if configured
       let driveFileUrl = "";
       const driveWebhookUrl = Deno.env.get("GOOGLE_DRIVE_WEBHOOK_URL") || "";
+      const driveSecretKey = Deno.env.get("OAV_DRIVE_SECRET_KEY") || "oav_mantra_vault_secure_2026_9971";
       if (driveWebhookUrl && hasScreenshot) {
         try {
           const driveRes = await fetch(driveWebhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              secretKey: driveSecretKey,
               action: "upload_payment",
               folderType: "payments",
               base64Data: rawScreenshot,
@@ -153,11 +155,12 @@ serve(async (req: Request) => {
         status: "pending_verification",
       };
 
-      if (hasScreenshot) {
-        payload.payment_screenshot = rawScreenshot;
-      }
       if (driveFileUrl) {
         payload.drive_file_url = driveFileUrl;
+        // Lean storage protection for Supabase Free tier (saves ~60-byte link instead of 2MB base64)
+        payload.payment_screenshot = driveFileUrl;
+      } else if (hasScreenshot) {
+        payload.payment_screenshot = rawScreenshot;
       }
 
       let { error: payErr } = await supabase.from("payments").insert([payload]);
@@ -192,12 +195,14 @@ serve(async (req: Request) => {
 
       let drivePhotoUrl = "";
       const driveWebhookUrl = Deno.env.get("GOOGLE_DRIVE_WEBHOOK_URL") || "";
+      const driveSecretKey = Deno.env.get("OAV_DRIVE_SECRET_KEY") || "oav_mantra_vault_secure_2026_9971";
       if (driveWebhookUrl && typeof photo === "string" && photo.startsWith("data:image/")) {
         try {
           const driveRes = await fetch(driveWebhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              secretKey: driveSecretKey,
               action: "upload_photo",
               folderType: "photos",
               base64Data: photo,
@@ -215,9 +220,13 @@ serve(async (req: Request) => {
         }
       }
 
-      const updatePayload: Record<string, unknown> = { photo };
+      const updatePayload: Record<string, unknown> = {};
       if (drivePhotoUrl) {
         updatePayload.drive_photo_url = drivePhotoUrl;
+        // Lean storage protection for Supabase Free tier (stores Drive link, preserving 500MB quota)
+        updatePayload.photo = drivePhotoUrl;
+      } else {
+        updatePayload.photo = photo;
       }
 
       let { data, error } = await supabase

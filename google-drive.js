@@ -71,6 +71,10 @@ function getWebhookUrl() {
   return url && url.startsWith("https://") ? url : "";
 }
 
+function getSecretKey() {
+  return readEnvSetting("OAV_DRIVE_SECRET_KEY") || "oav_mantra_vault_secure_2026_9971";
+}
+
 function getFolderId(type = "photos") {
   if (type === "payments") {
     const payFolder = readEnvSetting("GOOGLE_DRIVE_PAYMENTS_FOLDER_ID");
@@ -153,10 +157,15 @@ async function uploadViaWebhook(payload) {
   const webhookUrl = getWebhookUrl();
   if (!webhookUrl) throw new Error("GOOGLE_DRIVE_WEBHOOK_URL not configured");
 
+  const securePayload = {
+    secretKey: getSecretKey(),
+    ...payload
+  };
+
   const res = await fetch(webhookUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(securePayload)
   });
 
   const data = await res.json().catch(() => ({}));
@@ -168,7 +177,9 @@ async function uploadViaWebhook(payload) {
     fileId: data.fileId || "gdrive-webhook-" + Date.now(),
     fileName: data.fileName || payload.fileName,
     webViewLink: data.fileUrl || data.webViewLink || data.url || "",
-    webContentLink: data.downloadUrl || data.webContentLink || data.url || ""
+    webContentLink: data.downloadUrl || data.webContentLink || data.url || "",
+    embedUrl: data.embedUrl || (data.fileId ? `https://drive.google.com/thumbnail?id=${data.fileId}&sz=w1000` : ""),
+    directUrl: data.directUrl || (data.fileId ? `https://lh3.googleusercontent.com/d/${data.fileId}` : "")
   };
 }
 
@@ -299,5 +310,6 @@ module.exports = {
   uploadPaymentScreenshotToDrive,
   getCredentials,
   getWebhookUrl,
+  getSecretKey,
   getFolderId
 };

@@ -8,7 +8,8 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   isGoogleDriveConfigured,
   uploadStudentPhotoToDrive,
-  uploadPaymentScreenshotToDrive
+  uploadPaymentScreenshotToDrive,
+  getSecretKey
 } = require("./google-drive.js");
 
 const PORT = Number(process.env.PORT || 3000);
@@ -847,11 +848,13 @@ const server = http.createServer(async (req, res) => {
         console.log(`[Google Drive] Skipped upload for ${student.enrollment_id}: Google Drive is not configured.`);
       }
 
-      // Save student photo in database so it ALWAYS appears in Admin Panel
+      // Save student photo in database (Lean storage: uses Drive URL when available to preserve database quota)
       const drivePhotoUrl = driveResult ? (driveResult.webViewLink || driveResult.fileUrl) : null;
-      const photoToSave = (highResPhoto && highResPhoto.startsWith("data:image/")) 
-        ? highResPhoto 
-        : ((photo && photo.startsWith("data:image/")) ? photo : (drivePhotoUrl || ""));
+      const photoToSave = drivePhotoUrl 
+        ? drivePhotoUrl 
+        : ((highResPhoto && highResPhoto.startsWith("data:image/")) 
+            ? highResPhoto 
+            : ((photo && photo.startsWith("data:image/")) ? photo : ""));
       const cleanId = String(student.enrollment_id).trim().toUpperCase();
       const altId = cleanId.startsWith("OAV-") ? cleanId.replace(/^OAV-/, "") : `OAV-${cleanId}`;
       db.prepare("UPDATE students SET photo = ?, drive_photo_url = COALESCE(?, drive_photo_url) WHERE UPPER(TRIM(enrollment_id)) = ? OR UPPER(TRIM(enrollment_id)) = ?")
@@ -968,11 +971,14 @@ const server = http.createServer(async (req, res) => {
       // Admin Google Drive Configuration & Status
       if (req.method === "GET" && url.pathname === "/api/admin/drive-config") {
         const webhookUrl = process.env.GOOGLE_DRIVE_WEBHOOK_URL || localSetting("GOOGLE_DRIVE_WEBHOOK_URL") || "";
+        const secretKey = getSecretKey();
         const isConfigured = isGoogleDriveConfigured();
         return send(res, 200, {
           configured: isConfigured,
           webhookUrl: webhookUrl ? `${webhookUrl.slice(0, 35)}...${webhookUrl.slice(-10)}` : "",
           fullWebhookUrl: webhookUrl,
+          secretKey: secretKey,
+          securityMode: "Enforced (Secret Key + MIME Check + 5MB Limit)",
           method: webhookUrl ? "Google Apps Script Webhook" : (isConfigured ? "Service Account API" : "None")
         });
       }
@@ -980,6 +986,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "POST" && url.pathname === "/api/admin/drive-config") {
         const body = await readBody(req);
         const webhookUrl = clean(body.webhookUrl, 300);
+        const secretKey = clean(body.secretKey, 100);
         if (!webhookUrl || !webhookUrl.startsWith("https://script.google.com/")) {
           return send(res, 400, { error: "Please enter a valid Google Apps Script Web App URL (starting with https://script.google.com/)." });
         }
@@ -993,6 +1000,14 @@ const server = http.createServer(async (req, res) => {
           } else {
             envContent += `\nGOOGLE_DRIVE_WEBHOOK_URL=${webhookUrl}\n`;
           }
+          if (secretKey) {
+            if (envContent.includes("OAV_DRIVE_SECRET_KEY=")) {
+              envContent = envContent.replace(/OAV_DRIVE_SECRET_KEY=.*/, `OAV_DRIVE_SECRET_KEY=${secretKey}`);
+            } else {
+              envContent += `\nOAV_DRIVE_SECRET_KEY=${secretKey}\n`;
+            }
+            process.env.OAV_DRIVE_SECRET_KEY = secretKey;
+          }
           fs.writeFileSync(configPath, envContent, "utf8");
         }
         process.env.GOOGLE_DRIVE_WEBHOOK_URL = webhookUrl;
@@ -1000,7 +1015,8 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, {
           success: true,
           configured: true,
-          message: "Google Drive Webhook URL saved successfully."
+          secretKey: secretKey || getSecretKey(),
+          message: "Google Drive Webhook URL & Secret Key saved successfully."
         });
       }
 
@@ -1312,11 +1328,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       const driveProofUrl = driveProofResult ? (driveProofResult.webViewLink || driveProofResult.fileUrl) : null;
+      // Lean storage optimization: store Drive URL in payment_screenshot column if available to save database space
+      const screenshotToSave = driveProofUrl || (hasScreenshot ? screenshot : null);
 
       db.prepare(`
         INSERT INTO payments (enrollment_id, amount, transaction_id, payment_screenshot, drive_file_url, payment_date, payment_method)
         VALUES (?, 500, ?, ?, ?, ?, ?)
-      `).run(student.enrollment_id, hasTx ? tx : null, hasScreenshot ? screenshot : null, driveProofUrl, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
+      `).run(student.enrollment_id, hasTx ? tx : null, screenshotToSave, driveProofUrl, paymentDate || new Date().toISOString().slice(0, 10), method || "quickupi");
 
       db.prepare("UPDATE students SET status = 'payment_review' WHERE enrollment_id = ?").run(student.enrollment_id);
 

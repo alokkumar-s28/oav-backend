@@ -32,3 +32,4 @@ SELECT
 FROM information_schema.columns 
 WHERE table_name IN ('students', 'payments') 
   AND column_name IN ('payment_screenshot', 'drive_file_url', 'drive_photo_url');
+
